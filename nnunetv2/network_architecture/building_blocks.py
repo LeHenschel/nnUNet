@@ -2,12 +2,27 @@ import torch
 from torch import nn
 import numpy as np
 from typing import Union, Type, List, Tuple
+import logging
 
 from torch.nn.modules.conv import _ConvNd
 from torch.nn.modules.dropout import _DropoutNd
 
-from dynamic_network_architectures.building_blocks.helper import maybe_convert_scalar_to_list, get_matching_pool_op, get_matching_convtransp
+from dynamic_network_architectures.building_blocks.helper import maybe_convert_scalar_to_list, get_matching_pool_op
 from nnunetv2.network_architecture.layers import ReLUConvDropOutNormMax, InputNormConvNorm
+from nnunetv2.network_architecture.helper import get_matching_unpooling
+
+# Default logging for debugging
+logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG)
+
+
+class MultiInputOutputSequential(nn.Sequential):
+    def forward(self, *inputs):
+        for module in self._modules.values():
+            if type(inputs) == tuple:
+                inputs = module(*inputs)
+            else:
+                inputs = module(inputs)
+        return inputs
 
 
 class CNNEncoder(nn.Module):
@@ -73,45 +88,48 @@ class CNNEncoder(nn.Module):
                                          "Important: first entry is recommended to be 1, else we run strided conv drectly on the input"
 
         stages = []
+        pooling = []
         first = True
         for s in range(n_stages):
-            stage_modules = []
+            logging.info(f"Stage {s}")
             if pool == 'max' or pool == 'avg':
                 if (isinstance(strides[s], int) and strides[s] != 1) or \
                         isinstance(strides[s], (tuple, list)) and any([i != 1 for i in strides[s]]):
                     # kernel_size=params["pool"]=2, stride_params=["stride_pool"]=2 for FCNN
                     # --> get pool operation (maxPool2D or 3D)
                     # add pooling op, if stride is != 1, otherwise only add CDB to the stage_modules list
-                    stage_modules.append(get_matching_pool_op(conv_op, pool_type=pool)(kernel_size=strides[s],
+                    pooling.append(get_matching_pool_op(conv_op, pool_type=pool)(kernel_size=strides[s],
                                                                                        stride=strides[s],
                                                                                        return_indices=return_pool_idx))
+                    logging.debug(f"Pool {pool} return {return_pool_idx} with stride {strides[s]}")
                 conv_stride = 1
             elif pool == 'conv':
                 conv_stride = strides[s]
             else:
                 raise RuntimeError()
             # Add the CompetitiveDenseBloc --> for FCNN, the very first one should be different (inputCDB)
-            stage_modules.append(CompetitiveDenseBlocks(
+            logging.debug(f"Nr Conv ops {n_conv_per_stage[s]}, input C {input_channels}, features {features_per_stage[s]},"
+                  f"kernel {kernel_sizes[s]}")
+            stages.append(CompetitiveDenseBlocks(
                 n_conv_per_stage[s], conv_op, input_channels, features_per_stage[s], kernel_sizes[s], conv_stride,
                 first, conv_bias, norm_op, norm_op_kwargs, dropout_op, dropout_op_kwargs, nonlin, nonlin_kwargs
             ))
+
             first = False
             # Create Sequential list from stage_modules (careful: can not pass any parameters to nn.Sequential
             # in the forward call! --> might need own implementation for VINN here; also would need output from
             # Pooling and Convolution if pool_idx is defined!)
-            stages.append(nn.Sequential(*stage_modules))
+            # stages.append(MultiInputOutputSequential(*stage_modules))
+
             # Change input channels to the number of output features after the CDB block
             input_channels = features_per_stage[s]
 
-        self.stages = nn.Sequential(*stages)
+        self.stages = nn.ModuleList(stages)
+        self.pooling = nn.ModuleList(pooling)
         self.output_channels = features_per_stage  # list of features per block
         self.strides = [maybe_convert_scalar_to_list(conv_op, i) for i in strides]
         self.return_skips = return_skips
         self.return_pool_idx = return_pool_idx
-        if self.return_pool_idx is True and self.return_skips is False:
-            raise AssertionError(f"Index Unpooling requires return of skip connections! "
-                                 f"But return_pool_index is set to {self.return_pool_idx} while "
-                                 f"return skips is set to {self.return_skips}. Exiting.")
 
         # we store some things that a potential decoder needs
         self.conv_op = conv_op
@@ -147,13 +165,34 @@ class CNNEncoder(nn.Module):
                 3. Encoded feature maps and indices for pooling operation ((s1), (s2, p2), (s3, p3), (s4, p4), (s5, p5))
         """
         ret = []
-        for s in self.stages:
-            x = s(x)
+        pidx = []
+        for s in range(len(self.stages)-1):
+            # We start with the convolution, then the pooling operation
+            x = self.stages[s](x)
+            logging.debug(f"Block {s}, shape out {x.shape}")
+            # Append convolution before pooling for the skip connections
             ret.append(x)
-        if self.return_skips:
+            # Now perform the pooling operation --> output here is input to next CDB Block
+            x = self.pooling[s](x)
+            if self.return_pool_idx:
+                # If we have index unpooling, we get the index and the pooled feature map
+                # Otherwise, only the pooled feature maps are returned
+                pidx.append(x[1])
+                x = x[0]
+
+        # Final convolution in bottleneck block (does not have associated pooling op)
+        x = self.stages[-1](x)
+        logging.debug(f"Block fin, shape out {x.shape}")
+        ret.append(x)  # Append last result (bottleneck block, no Pooling)
+        # Return skip connections
+        if not self.return_skips and not self.return_pool_idx:
+            # Only return final output
+            return x
+        elif not self.return_pool_idx:
+            # Return skip connections, but not pooling idx (because they are not defined)
             return ret
         else:
-            return ret[-1]
+            return ret, pidx
 
     def compute_conv_feature_map_size(self, input_size):
         output = np.int64(0)
@@ -173,7 +212,7 @@ class CNNDecoder(nn.Module):
                  encoder: CNNEncoder,
                  num_classes: int,
                  n_conv_per_stage: Union[int, Tuple[int, ...], List[int]],
-                 deep_supervision, nonlin_first: bool = False):
+                 deep_supervision, index_unpool: bool = False, nonlin_first: bool = False):
         """
         This class needs the skips of the encoder as input in its forward.
         the encoder goes all the way to the bottleneck, so that's where the decoder picks up. stages in the decoder
@@ -190,6 +229,7 @@ class CNNDecoder(nn.Module):
         """
         super().__init__()
         self.deep_supervision = deep_supervision
+        self.index_unpool = index_unpool
         self.encoder = encoder
         self.num_classes = num_classes
         n_stages_encoder = len(encoder.output_channels)
@@ -199,7 +239,7 @@ class CNNDecoder(nn.Module):
                                                           "resolution stages - 1 (n_stages in encoder - 1), " \
                                                           "here: %d" % n_stages_encoder
 
-        transpconv_op = get_matching_convtransp(conv_op=encoder.conv_op)
+        transpconv_op = get_matching_unpooling(conv_op=encoder.conv_op, idx_unpool=index_unpool)
 
         # we start with the bottleneck and work out way up
         stages = []
@@ -209,13 +249,18 @@ class CNNDecoder(nn.Module):
             input_features_below = encoder.output_channels[-s]
             input_features_skip = encoder.output_channels[-(s + 1)]
             stride_for_transpconv = encoder.strides[-s]
-            transpconvs.append(transpconv_op(
-                input_features_below, input_features_skip, stride_for_transpconv, stride_for_transpconv,
-                bias=encoder.conv_bias
-            ))
-            # input features to conv is 2x input_features_skip (concat input_features_skip with transpconv output)
+            if not self.index_unpool:
+                transpconvs.append(transpconv_op(input_features_below, input_features_skip, stride_for_transpconv,
+                                                 stride_for_transpconv, bias=encoder.conv_bias
+                                                 )
+                                   )
+            else:
+                transpconvs.append(transpconv_op(kernel_size=stride_for_transpconv, stride=stride_for_transpconv))
+
+            # input features to conv is 1 x input_features_skip (concat replaced with maximum for
+            # input_features_skip with transpconv output)
             stages.append(CompetitiveDenseBlocks(
-                n_conv_per_stage[s-1], encoder.conv_op, 2 * input_features_skip, input_features_skip,
+                n_conv_per_stage[s-1], encoder.conv_op, input_features_skip, input_features_skip,
                 encoder.kernel_sizes[-(s + 1)], 1, False, encoder.conv_bias, encoder.norm_op, encoder.norm_op_kwargs,
                 encoder.dropout_op, encoder.dropout_op_kwargs, encoder.nonlin, encoder.nonlin_kwargs
             ))
@@ -229,7 +274,7 @@ class CNNDecoder(nn.Module):
         self.transpconvs = nn.ModuleList(transpconvs)
         self.seg_layers = nn.ModuleList(seg_layers)
 
-    def forward(self, skips):
+    def forward(self, skips, *args):
         """
         we expect to get the skips in the order they were computed, so the bottleneck should be the last entry
         Forward call to FastSurferCNN - Competitive Decoder Block
@@ -246,13 +291,22 @@ class CNNDecoder(nn.Module):
         p4, s4      --> [ Transpose/Unpool -> CDB ] -> o1 ---> 1x1 conv (if deep_supervision, otherwise only last layer)
             s5 = skips[-1] ^
         Args:
-            x: image (patch) to process
+            skips: outputs of encoder (skip connections)
+            *args: optional, index for unpooling op, if index unpooling should be used and maxpooling was used in encoder
         """
         lres_input = skips[-1]
         seg_outputs = []
+        logging.debug(len(args[0]), len(skips))
+        if args:
+            indices = args[0]
         for s in range(len(self.stages)):
-            x = self.transpconvs[s](lres_input)
-            x = torch.cat((x, skips[-(s+2)]), 1)
+            logging.debug(f"Stage {s}, idx: {-(s+1)}, skip: {-(s+2)}")
+            if self.index_unpool:
+                x = self.transpconvs[s](lres_input, indices[-(s+1)])
+            else:
+                x = self.transpconvs[s](lres_input)
+            logging.debug(f"Orig shape: {lres_input.shape}, Upsample shape: {x.shape}, Skip shape: {skips[-(s+2)].shape}")
+            x = torch.maximum(x, skips[-(s+2)])
             x = self.stages[s](x)
             if self.deep_supervision:
                 seg_outputs.append(self.seg_layers[s](x))
@@ -281,22 +335,23 @@ class CNNDecoder(nn.Module):
         for s in range(len(self.encoder.strides) - 1):
             skip_sizes.append([i // j for i, j in zip(input_size, self.encoder.strides[s])])
             input_size = skip_sizes[-1]
-        # print(skip_sizes)
+        # logging.debug(skip_sizes)
 
         assert len(skip_sizes) == len(self.stages)
 
         # our ops are the other way around, so let's match things up
         output = np.int64(0)
         for s in range(len(self.stages)):
-            # print(skip_sizes[-(s+1)], self.encoder.output_channels[-(s+2)])
+            # logging.debug(f"stage {s}, Skip sizes: {skip_sizes[-(s+1)]}, output_channels: {self.encoder.output_channels[-(s+2)]}")
             # conv blocks
             output += self.stages[s].compute_conv_feature_map_size(skip_sizes[-(s+1)])
             # trans conv
-            output += np.prod([self.encoder.output_channels[-(s+2)], *skip_sizes[-(s+1)]], dtype=np.int64)
+            if not self.index_unpool:
+                output += np.prod([self.encoder.output_channels[-(s+2)], *skip_sizes[-(s+1)]], dtype=np.int64)
             # segmentation
             if self.deep_supervision or (s == (len(self.stages) - 1)):
                 output += np.prod([self.num_classes, *skip_sizes[-(s+1)]], dtype=np.int64)
-        return
+        return output
 
 
 class CompetitiveDenseBlocks(nn.Module):
@@ -341,26 +396,30 @@ class CompetitiveDenseBlocks(nn.Module):
             output_channels = [output_channels] * num_convs
 
         stage_modules = []
+        start=0
         if first:
             stage_modules.append(InputNormConvNorm(conv_op, input_channels, output_channels[0], kernel_size,
                                                    initial_stride, norm_op, conv_bias, norm_op_kwargs, dropout_op,
                                                    dropout_op_kwargs))
-            num_convs -= 1
+            start=1
+            input_channels = output_channels[0]
+            logging.debug(f"Input CDB - stage 0: input {input_channels}, output {output_channels[0]}")
 
         # Add Core RCDNM Block (three in original implementation) -> one conv at end, so num_convs -1 in loop (total=4)
         # Add final RCDN Block = No Maxout in last layer
-        stage_modules.extend([ReLUConvDropOutNormMax(conv_op, output_channels[i - 1], output_channels[i], kernel_size,
-                                                     1, conv_bias, norm_op, norm_op_kwargs, dropout_op,
-                                                     dropout_op_kwargs, nonlin, nonlin_kwargs, max_last=True
-                                                     )
-                              for i in range(1, num_convs-1)
-                              ] +
-                             [ReLUConvDropOutNormMax(conv_op, output_channels[-2], output_channels[-1], kernel_size,
+        for i in range(start, num_convs-1):
+            stage_modules.append(ReLUConvDropOutNormMax(conv_op, input_channels, output_channels[i],
+                                                        kernel_size, 1, conv_bias, norm_op, norm_op_kwargs, dropout_op,
+                                                        dropout_op_kwargs, nonlin, nonlin_kwargs, max_last=True
+                                                        ))
+            logging.debug(f"CDB - stage {i}: input {input_channels}, output {output_channels[i]}")
+            input_channels = output_channels[i]
+        stage_modules.append(ReLUConvDropOutNormMax(conv_op, output_channels[-2], output_channels[-1], kernel_size,
                                                      1, conv_bias, norm_op, norm_op_kwargs, dropout_op,
                                                      dropout_op_kwargs, nonlin, nonlin_kwargs, max_last=False
                                                      )
-                             ]
                              )
+        logging.debug(f"CDB - fin stage {num_convs-1}: input {output_channels[-2]}, output {output_channels[-1]}")
 
         self.convs = nn.Sequential(*stage_modules)
         self.output_channels = output_channels[-1]
@@ -379,3 +438,38 @@ class CompetitiveDenseBlocks(nn.Module):
         for b in self.convs[1:]:
             output += b.compute_conv_feature_map_size(size_after_stride)
         return output
+
+
+if __name__ == '__main__':
+    data = torch.rand((1, 4, 128, 128, 128))
+
+    encoder = CNNEncoder(input_channels=4,
+                         n_stages=5,
+                         features_per_stage=(32, 32, 32, 32, 32),
+                         conv_op=nn.Conv3d,
+                         kernel_sizes=3,
+                         strides=(1, 2, 2, 2, 2),
+                         n_conv_per_stage=(4, 4, 4, 4, 4),
+                         #num_classes=4,
+                         #nconv_per_stage_decoder=(2, 2, 2, 2, 2),
+                         conv_bias=False,
+                         norm_op=nn.BatchNorm3d, norm_op_kwargs=None,
+                         dropout_op=None, dropout_op_kwargs=None,
+                         nonlin=nn.ReLU, nonlin_kwargs=None,
+                         return_skips=True, return_pool_idx=True, pool="max")
+
+    test, idx = encoder.forward(data)
+    # 5 skip connections/network outputs), 4 pool idx)
+    logging.debug(len(test), len(test), len(idx))
+    for i in range(len(test)):
+        logging.debug(f"Level {i}: Shape tensor {test[i].shape}")
+    #logging.debug(encoder.compute_conv_feature_map_size(data.shape[2:]))
+
+    data = torch.rand((1, 320, 16, 16, 16))
+
+    decoder = CNNDecoder(encoder=encoder, num_classes=8,
+                         n_conv_per_stage=4, deep_supervision=True, index_unpool=True)
+    fin = decoder.forward(test, idx)
+    for layer in fin:
+        logging.debug(layer.shape)
+    logging.debug(decoder.compute_conv_feature_map_size(fin[0].shape[2:]))

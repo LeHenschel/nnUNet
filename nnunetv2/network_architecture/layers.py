@@ -113,6 +113,9 @@ class ReLUConvDropOutNormMax(nn.Module):
 
     def forward(self, x):
         # Get Max between original input and ReLU-Conv-Dropout-Norm step
+        # Note, this only works if the number of feature-maps is equal across the
+        # resolution stages. Otherwise, the blocks mismatch at dimension 1 for the first
+        # maxout step --> could potentially increase the number by two in this case
         if self.max_last:
             x = torch.maximum(x, self.all_modules(x))
         else:

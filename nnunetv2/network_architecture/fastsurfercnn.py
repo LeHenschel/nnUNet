@@ -46,11 +46,12 @@ class FastSurferCNN(nn.Module):
                                                                 f"stages, so it should have {n_stages - 1} entries. " \
                                                                 f"n_conv_per_stage_decoder: {n_conv_per_stage_decoder}"
         self.encoder = bb.CNNEncoder(input_channels, n_stages, features_per_stage, conv_op, kernel_sizes, strides,
-                                        n_conv_per_stage, conv_bias, norm_op, norm_op_kwargs, dropout_op,
-                                        dropout_op_kwargs, nonlin, nonlin_kwargs, return_skips=True,
-                                        nonlin_first=nonlin_first)
-        self.decoder = bb.CNNDecoder(self.encoder, num_classes, n_conv_per_stage_decoder, deep_supervision,
-                                     nonlin_first=nonlin_first)
+                                     n_conv_per_stage, conv_bias, norm_op, norm_op_kwargs, dropout_op,
+                                     dropout_op_kwargs, nonlin, nonlin_kwargs, return_skips=True,
+                                     nonlin_first=False, pool="max", return_pool_idx=True)
+        self.decoder = bb.CNNDecoder(self.encoder, num_classes, n_conv_per_stage_decoder,
+                                     deep_supervision=deep_supervision, index_unpool=True,
+                                     nonlin_first=False)
 
     def forward(self, x):
         skips = self.encoder(x)
@@ -66,30 +67,36 @@ class FastSurferCNN(nn.Module):
 if __name__ == '__main__':
     data = torch.rand((1, 4, 128, 128, 128))
 
-    model = FastSurferCNN(4, 6, (32, 64, 125, 256, 320, 320), nn.Conv3d, 3, (1, 2, 2, 2, 2, 2), (2, 2, 2, 2, 2, 2), 4,
-                                (2, 2, 2, 2, 2), False, nn.BatchNorm3d, None, None, None, nn.ReLU, deep_supervision=True)
-
-    if False:
-        import hiddenlayer as hl
-
-        g = hl.build_graph(model, data,
-                           transforms=None)
-        g.save("network_architecture.pdf")
-        del g
+    model = FastSurferCNN(input_channels=4,
+                          n_stages=6,
+                          features_per_stage=64,
+                          conv_op=nn.Conv3d,
+                          kernel_sizes=3,
+                          strides=(1, 2, 2, 2, 2, 2),
+                          n_conv_per_stage=(2, 2, 2, 2, 2, 2),
+                          num_classes=4,
+                          n_conv_per_stage_decoder=(2, 2, 2, 2, 2),
+                          conv_bias=False,
+                          norm_op=nn.BatchNorm3d, norm_op_kwargs=None,
+                          dropout_op=None, dropout_op_kwargs=None,
+                          nonlin=nn.ReLU, deep_supervision=True)
 
     print(model.compute_conv_feature_map_size(data.shape[2:]))
 
     data = torch.rand((1, 4, 512, 512))
 
-    model = FastSurferCNN(4, 8, (32, 64, 125, 256, 512, 512, 512, 512), nn.Conv2d, 3, (1, 2, 2, 2, 2, 2, 2, 2), (2, 2, 2, 2, 2, 2, 2, 2), 4,
-                                (2, 2, 2, 2, 2, 2, 2), False, nn.BatchNorm2d, None, None, None, nn.ReLU, deep_supervision=True)
-
-    if False:
-        import hiddenlayer as hl
-
-        g = hl.build_graph(model, data,
-                           transforms=None)
-        g.save("network_architecture.pdf")
-        del g
+    model = FastSurferCNN(input_channels=4,
+                          n_stages=8,
+                          features_per_stage=64,
+                          conv_op=nn.Conv2d,
+                          kernel_sizes=3,
+                          strides=(1, 2, 2, 2, 2, 2, 2, 2),
+                          n_conv_per_stage=(2, 2, 2, 2, 2, 2, 2, 2),
+                          num_classes=4,
+                          n_conv_per_stage_decoder=(2, 2, 2, 2, 2, 2, 2),
+                          conv_bias=False,
+                          norm_op=nn.BatchNorm2d, norm_op_kwargs=None,
+                          dropout_op=None, dropout_op_kwargs=None,
+                          nonlin=nn.ReLU, deep_supervision=True)
 
     print(model.compute_conv_feature_map_size(data.shape[2:]))
