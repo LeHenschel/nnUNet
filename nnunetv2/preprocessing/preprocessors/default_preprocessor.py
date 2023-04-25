@@ -38,12 +38,27 @@ class DefaultPreprocessor(object):
     def run_case_npy(self, data: np.ndarray, seg: Union[np.ndarray, None], properties: dict,
                      plans_manager: PlansManager, configuration_manager: ConfigurationManager,
                      dataset_json: Union[dict, str]):
+        """
+        This is the actual function used for running the preprocessing. The other ones down below just call
+        it for each case.
+        Args:
+            data: image data (loaded from file)
+            seg: segmentation data (loaded from file)
+            properties: image data properties (SITK information from file: spacing, origin)
+            plans_manager: loaded plans information (plans.pkl)
+            configuration_manager: loaded configuration information
+            dataset_json: dataset description (dataset.json)
+
+        Returns:
+            processed image and segmentation (cropping, resampling, padding)
+        """
         has_seg = seg is not None
 
         # apply transpose_forward, this also needs to be applied to the spacing!
         data = data.transpose([0, *[i + 1 for i in plans_manager.transpose_forward]])
         if seg is not None:
             seg = seg.transpose([0, *[i + 1 for i in plans_manager.transpose_forward]])
+        # Original spacing of the image
         original_spacing = [properties['spacing'][i] for i in plans_manager.transpose_forward]
 
         # crop, remember to store size before cropping!
@@ -52,10 +67,10 @@ class DefaultPreprocessor(object):
         # this command will generate a segmentation. This is important because of the nonzero mask which we may need
         data, seg, bbox = crop_to_nonzero(data, seg)
         properties['bbox_used_for_cropping'] = bbox
-        # print(data.shape, seg.shape)
+        # print(data.shape, seg.shape) --> actually do not use resampling but padding here
         properties['shape_after_cropping_and_before_resampling'] = data.shape[1:]
 
-        # resample
+        # resample --> just pad to same size (we need to determine this somehow?)
         target_spacing = configuration_manager.spacing  # this should already be transposed
 
         if len(target_spacing) < len(data.shape[1:]):
@@ -73,8 +88,9 @@ class DefaultPreprocessor(object):
         # print('current shape', data.shape[1:], 'current_spacing', original_spacing,
         #       '\ntarget shape', new_shape, 'target_spacing', target_spacing)
         old_shape = data.shape[1:]
-        data = configuration_manager.resampling_fn_data(data, new_shape, original_spacing, target_spacing)
-        seg = configuration_manager.resampling_fn_seg(seg, new_shape, original_spacing, target_spacing)
+        # Turn off resampling
+        # data = configuration_manager.resampling_fn_data(data, new_shape, original_spacing, target_spacing)
+        # seg = configuration_manager.resampling_fn_seg(seg, new_shape, original_spacing, target_spacing)
         if self.verbose:
             print(f'old shape: {old_shape}, new_shape: {new_shape}, old_spacing: {original_spacing}, '
                   f'new_spacing: {target_spacing}, fn_data: {configuration_manager.resampling_fn_data}')
@@ -120,7 +136,7 @@ class DefaultPreprocessor(object):
         rw = plans_manager.image_reader_writer_class()
 
         # load image(s)
-        data, data_properites = rw.read_images(image_files)
+        data, data_properties = rw.read_images(image_files)
 
         # if possible, load seg
         if seg_file is not None:
@@ -128,9 +144,9 @@ class DefaultPreprocessor(object):
         else:
             seg = None
 
-        data, seg = self.run_case_npy(data, seg, data_properites, plans_manager, configuration_manager,
+        data, seg = self.run_case_npy(data, seg, data_properties, plans_manager, configuration_manager,
                                       dataset_json)
-        return data, seg, data_properites
+        return data, seg, data_properties
 
     def run_case_save(self, output_filename_truncated: str, image_files: List[str], seg_file: str,
                       plans_manager: PlansManager, configuration_manager: ConfigurationManager,
@@ -187,6 +203,7 @@ class DefaultPreprocessor(object):
             num_processes: int):
         """
         data identifier = configuration name in plans. EZ.
+        This is the function called in process_datasets in plan_and_preprocess_api.py
         """
         dataset_name = maybe_convert_to_dataset_name(dataset_name_or_id)
 
@@ -204,7 +221,9 @@ class DefaultPreprocessor(object):
         if self.verbose:
             print(configuration_manager)
 
+
         dataset_json_file = join(nnUNet_preprocessed, dataset_name, 'dataset.json')
+        print(f"Using json-dataset file {dataset_json_file}")
         dataset_json = load_json(dataset_json_file)
 
         identifiers = get_identifiers_from_splitted_dataset_folder(join(nnUNet_raw, dataset_name, 'imagesTr'),
