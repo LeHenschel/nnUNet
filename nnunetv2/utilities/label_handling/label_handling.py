@@ -50,7 +50,7 @@ class LabelManager(object):
 
     def _sanity_check(self, label_dict: dict):
         if not 'background' in label_dict.keys():
-            raise RuntimeError('Background label not declared (remeber that this should be label 0!)')
+            raise RuntimeError(f'Background label not declared (remember that this should be label 0!). Got {label_dict.keys()}')
         bg_label = label_dict['background']
         if isinstance(bg_label, (tuple, list)):
             raise RuntimeError(f"Background label must be 0. Not a list. Not a tuple. Your background label: {bg_label}")

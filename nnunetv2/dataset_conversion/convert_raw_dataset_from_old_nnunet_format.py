@@ -51,3 +51,7 @@ def convert_entry_point():
                         help='New dataset NAME (not path!). Must follow the DatasetXXX_NAME convention!')
     args = parser.parse_args()
     convert(args.input_folder, args.output_dataset_name)
+
+
+if __name__ == "__main__":
+    convert_entry_point()

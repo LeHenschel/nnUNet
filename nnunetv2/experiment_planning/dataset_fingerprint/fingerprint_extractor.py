@@ -84,12 +84,12 @@ class DatasetFingerprintExtractor(object):
         images, properties_images = rw.read_images(image_files)
         segmentation, properties_seg = rw.read_seg(segmentation_file)
 
-        # we no longer crop and save the cropped images before this is run. Instead we run the cropping on the fly.
+        # we no longer crop and save the cropped images before this is run. Instead, we run the cropping on the fly.
         # Downside is that we need to do this twice (once here and once during preprocessing). Upside is that we don't
         # need to save the cropped data anymore. Given that cropping is not too expensive it makes sense to do it this
         # way. This is only possible because we are now using our new input/output interface.
         data_cropped, seg_cropped, bbox = crop_to_nonzero(images, segmentation)
-
+        # saves the bbox and combines images (if multiple) along channel dimensions)
         foreground_intensities_per_channel, foreground_intensity_stats_per_channel = \
             DatasetFingerprintExtractor.collect_foreground_intensities(seg_cropped, data_cropped,
                                                                        num_samples=num_samples)

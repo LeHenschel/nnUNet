@@ -38,12 +38,14 @@ class ExperimentPlanner(object):
 
         # load dataset fingerprint
         if not isfile(join(preprocessed_folder, 'dataset_fingerprint.json')):
-            raise RuntimeError('Fingerprint missing for this dataset. Please run nnUNet_extract_dataset_fingerprint')
+            raise RuntimeError(f'Fingerprint missing for this dataset {preprocessed_folder}. '
+                               f'Please run nnUNet_extract_dataset_fingerprint')
 
         self.dataset_fingerprint = load_json(join(preprocessed_folder, 'dataset_fingerprint.json'))
 
         self.anisotropy_threshold = ANISO_THRESHOLD
 
+        # To DO: Change for FastSurfer
         self.UNet_base_num_features = 32
         self.UNet_class = PlainConvUNet
         # the following two numbers are really arbitrary and were set to reproduce nnU-Net v1's configurations as
@@ -118,6 +120,8 @@ class ExperimentPlanner(object):
 
         determine_resampling is called within get_plans_for_configuration to allow for different functions for each
         configuration
+
+        To Do: change so images are not resampled, but padded to same shape
         """
         resampling_data = resample_data_or_seg_to_shape
         resampling_data_kwargs = {
@@ -162,6 +166,8 @@ class ExperimentPlanner(object):
         (for example ACDC with (10, 1.5, 1.5)). These datasets still have examples with a spacing of 5 or 6 mm in the low
         resolution axis. Choosing the median here will result in bad interpolation artifacts that can substantially
         impact performance (due to the low number of slices).
+
+        To Do: Change to padding to allow training at original resolutions
         """
         if self.overwrite_target_spacing is not None:
             return np.array(self.overwrite_target_spacing)
@@ -194,7 +200,7 @@ class ExperimentPlanner(object):
             if target_spacing_of_that_axis < max(other_spacings):
                 target_spacing_of_that_axis = max(max(other_spacings), target_spacing_of_that_axis) + 1e-5
             target[worst_spacing_axis] = target_spacing_of_that_axis
-        return target
+        return target # this would be an array instead of a single number (currently = 1 output spacing size)
 
     def determine_normalization_scheme_and_whether_mask_is_used_for_norm(self) -> Tuple[List[str], List[bool]]:
         if 'channel_names' not in self.dataset_json.keys():
