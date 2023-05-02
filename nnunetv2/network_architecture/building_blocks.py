@@ -12,7 +12,7 @@ from nnunetv2.network_architecture.layers import ReLUConvDropOutNormMax, InputNo
 from nnunetv2.network_architecture.helper import get_matching_unpooling
 
 # Default logging for debugging
-logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG)
+logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.INFO)
 
 
 class MultiInputOutputSequential(nn.Sequential):
@@ -108,8 +108,8 @@ class CNNEncoder(nn.Module):
             else:
                 raise RuntimeError()
             # Add the CompetitiveDenseBloc --> for FCNN, the very first one should be different (inputCDB)
-            logging.debug(f"Nr Conv ops {n_conv_per_stage[s]}, input C {input_channels}, features {features_per_stage[s]},"
-                  f"kernel {kernel_sizes[s]}")
+            logging.debug(f"Nr Conv ops {n_conv_per_stage[s]}, input C {input_channels}, "
+                          f"features {features_per_stage[s]}, kernel {kernel_sizes[s]}")
             stages.append(CompetitiveDenseBlocks(
                 n_conv_per_stage[s], conv_op, input_channels, features_per_stage[s], kernel_sizes[s], conv_stride,
                 first, conv_bias, norm_op, norm_op_kwargs, dropout_op, dropout_op_kwargs, nonlin, nonlin_kwargs
@@ -128,6 +128,7 @@ class CNNEncoder(nn.Module):
         self.pooling = nn.ModuleList(pooling)
         self.output_channels = features_per_stage  # list of features per block
         self.strides = [maybe_convert_scalar_to_list(conv_op, i) for i in strides]
+        self.pool_diff = np.sum([i[0] for i in strides if i[0] == 1]) - 1
         self.return_skips = return_skips
         self.return_pool_idx = return_pool_idx
 
@@ -166,6 +167,7 @@ class CNNEncoder(nn.Module):
         """
         ret = []
         pidx = []
+
         for s in range(len(self.stages)-1):
             # We start with the convolution, then the pooling operation
             x = self.stages[s](x)
@@ -173,12 +175,13 @@ class CNNEncoder(nn.Module):
             # Append convolution before pooling for the skip connections
             ret.append(x)
             # Now perform the pooling operation --> output here is input to next CDB Block
-            x = self.pooling[s](x)
-            if self.return_pool_idx:
+            if s-self.pool_diff >= 0:
+                x = self.pooling[s-self.pool_diff](x)
+                if self.return_pool_idx:
                 # If we have index unpooling, we get the index and the pooled feature map
                 # Otherwise, only the pooled feature maps are returned
-                pidx.append(x[1])
-                x = x[0]
+                    pidx.append(x[1])
+                    x = x[0]
 
         # Final convolution in bottleneck block (does not have associated pooling op)
         x = self.stages[-1](x)
@@ -249,13 +252,14 @@ class CNNDecoder(nn.Module):
             input_features_below = encoder.output_channels[-s]
             input_features_skip = encoder.output_channels[-(s + 1)]
             stride_for_transpconv = encoder.strides[-s]
-            if not self.index_unpool:
-                transpconvs.append(transpconv_op(input_features_below, input_features_skip, stride_for_transpconv,
+            if stride_for_transpconv[0] != 1:
+                if not self.index_unpool:
+                    transpconvs.append(transpconv_op(input_features_below, input_features_skip, stride_for_transpconv,
                                                  stride_for_transpconv, bias=encoder.conv_bias
                                                  )
                                    )
-            else:
-                transpconvs.append(transpconv_op(kernel_size=stride_for_transpconv, stride=stride_for_transpconv))
+                else:
+                    transpconvs.append(transpconv_op(kernel_size=stride_for_transpconv, stride=stride_for_transpconv))
 
             # input features to conv is 1 x input_features_skip (concat replaced with maximum for
             # input_features_skip with transpconv output)
@@ -301,10 +305,13 @@ class CNNDecoder(nn.Module):
             indices = args[0]
         for s in range(len(self.stages)):
             logging.debug(f"Stage {s}, idx: {-(s+1)}, skip: {-(s+2)}")
-            if self.index_unpool:
-                x = self.transpconvs[s](lres_input, indices[-(s+1)])
+            if s + self.encoder.pool_diff < len(self.stages):
+                if self.index_unpool:
+                    x = self.transpconvs[s](lres_input, indices[-(s+1)])
+                else:
+                    x = self.transpconvs[s](lres_input)
             else:
-                x = self.transpconvs[s](lres_input)
+                x = lres_input
             logging.debug(f"Orig shape: {lres_input.shape}, Upsample shape: {x.shape}, Skip shape: {skips[-(s+2)].shape}")
             x = torch.maximum(x, skips[-(s+2)])
             x = self.stages[s](x)

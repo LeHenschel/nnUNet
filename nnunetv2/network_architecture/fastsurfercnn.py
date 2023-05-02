@@ -54,8 +54,8 @@ class FastSurferCNN(nn.Module):
                                      nonlin_first=False)
 
     def forward(self, x):
-        skips = self.encoder(x)
-        return self.decoder(skips)
+        skips, idx = self.encoder(x)
+        return self.decoder(skips, idx)
 
     def compute_conv_feature_map_size(self, input_size):
         assert len(input_size) == convert_conv_op_to_dim(self.encoder.conv_op), "just give the image size without color/feature channels or " \
