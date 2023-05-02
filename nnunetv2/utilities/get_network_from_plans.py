@@ -3,6 +3,7 @@ from dynamic_network_architectures.building_blocks.helper import get_matching_in
 from dynamic_network_architectures.initialization.weight_init import init_last_bn_before_add_to_0
 from nnunetv2.utilities.network_initialization import InitWeights_He
 from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
+from nnunetv2.network_architecture.fastsurfercnn import FastSurferCNN
 from torch import nn
 
 
@@ -27,7 +28,8 @@ def get_network_from_plans(plans_manager: PlansManager,
     segmentation_network_class_name = configuration_manager.UNet_class_name
     mapping = {
         'PlainConvUNet': PlainConvUNet,
-        'ResidualEncoderUNet': ResidualEncoderUNet
+        'ResidualEncoderUNet': ResidualEncoderUNet,
+        "FastSurferCNN": FastSurferCNN,
     }
     kwargs = {
         'PlainConvUNet': {
@@ -38,6 +40,13 @@ def get_network_from_plans(plans_manager: PlansManager,
             'nonlin': nn.LeakyReLU, 'nonlin_kwargs': {'inplace': True},
         },
         'ResidualEncoderUNet': {
+            'conv_bias': True,
+            'norm_op': get_matching_instancenorm(conv_op),
+            'norm_op_kwargs': {'eps': 1e-5, 'affine': True},
+            'dropout_op': None, 'dropout_op_kwargs': None,
+            'nonlin': nn.LeakyReLU, 'nonlin_kwargs': {'inplace': True},
+        },
+        'FastSurferCNN': {
             'conv_bias': True,
             'norm_op': get_matching_instancenorm(conv_op),
             'norm_op_kwargs': {'eps': 1e-5, 'affine': True},
@@ -57,12 +66,16 @@ def get_network_from_plans(plans_manager: PlansManager,
         if network_class != ResidualEncoderUNet else 'n_blocks_per_stage': configuration_manager.n_conv_per_stage_encoder,
         'n_conv_per_stage_decoder': configuration_manager.n_conv_per_stage_decoder
     }
+
+    print("Name", segmentation_network_class_name)
+    features_per_stage = configuration_manager.UNet_base_num_features if segmentation_network_class_name == "FastSurferCNN" else \
+        [min(configuration_manager.UNet_base_num_features * 2 ** i, configuration_manager.unet_max_num_features) for i in range(num_stages)]
+
     # network class name!!
     model = network_class(
         input_channels=num_input_channels,
         n_stages=num_stages,
-        features_per_stage=[min(configuration_manager.UNet_base_num_features * 2 ** i,
-                                configuration_manager.unet_max_num_features) for i in range(num_stages)],
+        features_per_stage=features_per_stage,
         conv_op=conv_op,
         kernel_sizes=configuration_manager.conv_kernel_sizes,
         strides=configuration_manager.pool_op_kernel_sizes,
