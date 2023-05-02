@@ -43,7 +43,7 @@ class PreprocessAdapter(DataLoader):
         seg_prev_stage = self._data[idx][1]
         ofile = self._data[idx][2]
         # if we have a segmentation from the previous stage we have to process it together with the images so that we
-        # can crop it appropriately (if needed). Otherwise it would just be resized to the shape of the data after
+        # can crop it appropriately (if needed). Otherwise, it would just be resized to the shape of the data after
         # preprocessing and then there might be misalignments
         data, seg, data_properites = self.preprocessor.run_case(files, seg_prev_stage, self.plans_manager,
                                                                 self.configuration_manager,

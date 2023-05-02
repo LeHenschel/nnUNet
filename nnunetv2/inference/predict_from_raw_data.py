@@ -618,33 +618,4 @@ def predict_entry_point():
 
 
 if __name__ == '__main__':
-    predict_from_raw_data('/media/fabian/data/nnUNet_raw/Dataset003_Liver/imagesTs',
-                          '/media/fabian/data/nnUNet_raw/Dataset003_Liver/imagesTs_predlowres',
-                          '/home/fabian/results/nnUNet_remake/Dataset003_Liver/nnUNetTrainer__nnUNetPlans__3d_lowres',
-                          (0,),
-                          0.5,
-                          use_gaussian=True,
-                          use_mirroring=False,
-                          perform_everything_on_gpu=True,
-                          verbose=True,
-                          save_probabilities=False,
-                          overwrite=False,
-                          checkpoint_name='checkpoint_final.pth',
-                          num_processes_preprocessing=3,
-                          num_processes_segmentation_export=3)
-
-    predict_from_raw_data('/media/fabian/data/nnUNet_raw/Dataset003_Liver/imagesTs',
-                          '/media/fabian/data/nnUNet_raw/Dataset003_Liver/imagesTs_predCascade',
-                          '/home/fabian/results/nnUNet_remake/Dataset003_Liver/nnUNetTrainer__nnUNetPlans__3d_cascade_fullres',
-                          (0,),
-                          0.5,
-                          use_gaussian=True,
-                          use_mirroring=False,
-                          perform_everything_on_gpu=True,
-                          verbose=True,
-                          save_probabilities=False,
-                          overwrite=True,
-                          checkpoint_name='checkpoint_final.pth',
-                          num_processes_preprocessing=2,
-                          num_processes_segmentation_export=2,
-                          folder_with_segs_from_prev_stage='/media/fabian/data/nnUNet_raw/Dataset003_Liver/imagesTs_predlowres')
+    predict_entry_point_modelfolder()
